@@ -10,6 +10,7 @@ import {
   JSONRPCRequest,
   EventEmitter,
   BaseConnectionContract,
+  VertoModify,
 } from '@signalwire/core'
 import RTCPeer from './RTCPeer'
 import { ConnectionOptions } from './utils/interfaces'
@@ -330,15 +331,15 @@ export class BaseConnection<EventTypes extends EventEmitter.ValidEventTypes>
   ): Promise<void> {
     return new Promise(async (resolve, reject) => {
       try {
+        if (!Object.keys(constraints).length) {
+          return this.logger.warn('Invalid constraints:', constraints)
+        }
+
         this.logger.debug(
           'updateConstraints trying constraints',
           this.__uuid,
           constraints
         )
-        if (!Object.keys(constraints).length) {
-          return this.logger.warn('Invalid constraints:', constraints)
-        }
-
         const shouldContinueWithUpdate =
           this.manageSendersWithConstraints(constraints)
 
@@ -350,12 +351,12 @@ export class BaseConnection<EventTypes extends EventEmitter.ValidEventTypes>
         }
 
         const newStream = await getUserMedia(constraints)
-        this.logger.debug('updateConstraints got stream', newStream)
         if (!this.options.localStream) {
           this.options.localStream = new MediaStream()
         }
         const { instance } = this.peer
         const tracks = newStream.getTracks()
+        this.logger.debug(`updateConstraints got ${tracks.length} tracks`)
         for (let i = 0; i < tracks.length; i++) {
           const newTrack = tracks[i]
           this.logger.debug('updateConstraints apply track: ', newTrack)
@@ -378,10 +379,14 @@ export class BaseConnection<EventTypes extends EventEmitter.ValidEventTypes>
             })
           if (transceiver && transceiver.sender) {
             this.logger.debug(
-              'updateConstraints FOUND - replaceTrack on it and on localStream'
+              'updateConstraints got transceiver',
+              transceiver.currentDirection,
+              transceiver.mid
             )
             await transceiver.sender.replaceTrack(newTrack)
-            this.logger.debug('updateConstraints replaceTrack SUCCESS')
+            this.logger.debug('updateConstraints replaceTrack')
+            transceiver.direction = 'sendrecv'
+            this.logger.debug('updateConstraints set to sendrecv')
             this.options.localStream.getTracks().forEach((track) => {
               if (track.kind === newTrack.kind && track.id !== newTrack.id) {
                 this.logger.debug(
@@ -395,21 +400,21 @@ export class BaseConnection<EventTypes extends EventEmitter.ValidEventTypes>
             this.options.localStream.addTrack(newTrack)
           } else {
             this.logger.debug(
-              'updateConstraints NOT FOUND - addTrack and start dancing!'
+              'updateConstraints no transceiver found. addTrack and start dancing!'
             )
             this.peer.type = 'offer'
             this.doReinvite = true
             this.options.localStream.addTrack(newTrack)
             instance.addTrack(newTrack, this.options.localStream)
           }
-          this.logger.debug('updateConstraints Simply update mic/cam')
+          this.logger.debug('updateConstraints simply update mic/cam')
           if (newTrack.kind === 'audio') {
             this.options.micId = newTrack.getSettings().deviceId
           } else if (newTrack.kind === 'video') {
             this.options.camId = newTrack.getSettings().deviceId
           }
         }
-        this.logger.debug('updateConstraints done!')
+        this.logger.debug('updateConstraints done')
         resolve()
       } catch (error) {
         this.logger.error('updateConstraints', error)
@@ -455,13 +460,11 @@ export class BaseConnection<EventTypes extends EventEmitter.ValidEventTypes>
     this.logger.debug('MUNGED SDP \n', `Type: ${type}`, '\n\n', mungedSDP)
     switch (type) {
       case 'offer':
-        // if (this.active) {
-        //   this.executeUpdateMedia()
-        // } else {
-
-        return this.executeInvite(mungedSDP)
-
-      // }
+        if (this.active) {
+          return this.executeUpdateMedia(mungedSDP)
+        } else {
+          return this.executeInvite(mungedSDP)
+        }
       case 'answer':
         this.logger.warn('Unhandled verto.answer')
         // this.executeAnswer()
@@ -482,6 +485,23 @@ export class BaseConnection<EventTypes extends EventEmitter.ValidEventTypes>
       this.logger.debug('Invite response', response)
     } catch (error) {
       this.setState('hangup')
+      throw error.jsonrpc
+    }
+  }
+
+  /** @internal */
+  async executeUpdateMedia(sdp: string) {
+    try {
+      const msg = VertoModify({
+        ...this.messagePayload,
+        sdp,
+        action: 'updateMedia',
+      })
+      const response = await this.vertoExecute(msg)
+      this.logger.debug('UpdateMedia response', response)
+    } catch (error) {
+      this.logger.error('UpdateMedia error', error)
+      // this.setState('hangup')
       throw error.jsonrpc
     }
   }
